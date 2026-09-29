@@ -108,15 +108,18 @@ class _AddDialog(tk.Toplevel):
         self.clear_img_btn = ttk.Button(btns, text="移除", command=self._on_clear_image, state="disabled")
         self.clear_img_btn.pack(side="left")
 
-        self.preview_label = tk.Label(right, text="（无图片）", bg=T.COLOR_CARD, fg=T.COLOR_TEXT_DIM,
+        self.preview_label = tk.Label(right, text="（无图片）", bg=T.COLOR_PANEL, fg=T.COLOR_TEXT_DIM,
                                       width=36, height=6, font=T.FONT_SMALL)
         self.preview_label.pack(fill="x", pady=(8, 0))
 
         # 描述
         ttk.Label(self.body, text="描述：", style="Panel.TLabel").pack(anchor="w", pady=(6, 2))
-        self.desc_text = tk.Text(self.body, height=5, width=44, bg=T.COLOR_CARD,
+        self.desc_text = tk.Text(self.body, height=5, width=44, bg=T.COLOR_PANEL,
                                  fg=T.COLOR_TEXT, insertbackground=T.COLOR_TEXT,
-                                 relief="flat", font=T.FONT_BASE, wrap="word")
+                                 relief="flat", bd=0, highlightthickness=1,
+                                 highlightbackground=T.COLOR_INPUT_BORDER,
+                                 highlightcolor=T.COLOR_INPUT_BORDER,
+                                 font=T.FONT_BASE, wrap="word")
         self.desc_text.pack(fill="x")
 
     def _on_type_change(self, _e=None) -> None:
@@ -246,14 +249,16 @@ class _EditSpotDialog(tk.Toplevel):
         ttk.Button(btns, text="粘贴(Ctrl+V)", command=self._on_paste).pack(side="left", padx=8)
         ttk.Button(btns, text="移除图片", command=self._on_remove_image).pack(side="left")
 
-        self.preview_label = tk.Label(right, bg=T.COLOR_CARD, fg=T.COLOR_TEXT_DIM,
+        self.preview_label = tk.Label(right, bg=T.COLOR_PANEL, fg=T.COLOR_TEXT_DIM,
                                       width=36, height=6, font=T.FONT_SMALL)
         self.preview_label.pack(fill="x", pady=(8, 0))
         self._load_current_preview()
 
         ttk.Label(body, text="描述：", style="Panel.TLabel").pack(anchor="w", pady=(6, 2))
-        self.desc_text = tk.Text(body, height=5, width=44, bg=T.COLOR_CARD, fg=T.COLOR_TEXT,
-                                 insertbackground=T.COLOR_TEXT, relief="flat",
+        self.desc_text = tk.Text(body, height=5, width=44, bg=T.COLOR_PANEL, fg=T.COLOR_TEXT,
+                                 insertbackground=T.COLOR_TEXT, relief="flat", bd=0,
+                                 highlightthickness=1, highlightbackground=T.COLOR_INPUT_BORDER,
+                                 highlightcolor=T.COLOR_INPUT_BORDER,
                                  font=T.FONT_BASE, wrap="word")
         self.desc_text.insert("1.0", self.spot.get("description", ""))
         self.desc_text.pack(fill="x")

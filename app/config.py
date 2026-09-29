@@ -12,7 +12,8 @@ APP_NAME = "CS:GO 瞄点记录"
 APP_VERSION = "0.1.0"
 
 # 数据库结构版本号（user_version），字段扩展时递增并写迁移逻辑
-DB_SCHEMA_VERSION = 1
+# v2: 新增 spot_images 多图表
+DB_SCHEMA_VERSION = 2
 
 # 图片导入约束
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 单张图片上限 10MB

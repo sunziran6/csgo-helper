@@ -51,6 +51,15 @@ CREATE INDEX IF NOT EXISTS idx_spots_map      ON spots(map_id);
 CREATE INDEX IF NOT EXISTS idx_spots_category ON spots(category_id);
 CREATE INDEX IF NOT EXISTS idx_spots_name     ON spots(name);
 CREATE INDEX IF NOT EXISTS idx_categories_map ON categories(map_id);
+
+-- 瞄点图片（多图）：一个瞄点可关联多张图片
+CREATE TABLE IF NOT EXISTS spot_images (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    spot_id    INTEGER NOT NULL REFERENCES spots(id) ON DELETE CASCADE,
+    image_path TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_spot_images_spot ON spot_images(spot_id);
 """
 
 
@@ -97,8 +106,35 @@ class Database:
         log.info("数据库初始化完成: %s (schema v%s)", self.db_path, config.DB_SCHEMA_VERSION)
 
     def _migrate(self, from_ver: int, to_ver: int) -> None:
-        """预留迁移钩子。当前 v1 为首版，无需迁移。"""
+        """轻量迁移。按版本递增逐步升级，幂等安全。"""
         log.info("执行迁移 %s -> %s", from_ver, to_ver)
+        if from_ver < 2 <= to_ver:
+            self._migrate_v1_to_v2()
+
+    def _migrate_v1_to_v2(self) -> None:
+        """v1→v2：将旧 spots.image_path 单图数据迁入 spot_images 多图表。
+
+        - spot_images 表已由 init_schema 创建；
+        - 仅迁移尚未在 spot_images 中出现的图片，保证幂等；
+        - 保留 spots.image_path 列（不删）作为首图快照，向后兼容。
+        """
+        with self.transaction() as cur:
+            rows = cur.execute(
+                "SELECT id, image_path FROM spots WHERE image_path IS NOT NULL AND image_path <> ''"
+            ).fetchall()
+            inserted = 0
+            for r in rows:
+                exists = cur.execute(
+                    "SELECT 1 FROM spot_images WHERE spot_id=? AND image_path=? LIMIT 1",
+                    (r["id"], r["image_path"]),
+                ).fetchone()
+                if not exists:
+                    cur.execute(
+                        "INSERT INTO spot_images(spot_id, image_path, sort_order) VALUES(?, ?, 0)",
+                        (r["id"], r["image_path"]),
+                    )
+                    inserted += 1
+            log.info("v1→v2 迁移：将 %d 个瞄点的图片迁入 spot_images", inserted)
 
     def integrity_check(self) -> bool:
         """db 损坏自检。"""

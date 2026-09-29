@@ -146,14 +146,14 @@ class SpotDao:
             "SELECT * FROM spots WHERE map_id=? ORDER BY sort_order, name COLLATE NOCASE",
             (map_id,),
         )
-        return [dict(r) for r in rows]
+        return self._attach_images([dict(r) for r in rows])
 
     def list_by_category(self, cat_id: int) -> list[dict]:
         rows = self.db.query(
             "SELECT * FROM spots WHERE category_id=? ORDER BY sort_order, name COLLATE NOCASE",
             (cat_id,),
         )
-        return [dict(r) for r in rows]
+        return self._attach_images([dict(r) for r in rows])
 
     def list_map_direct(self, map_id: int) -> list[dict]:
         """地图直属瞄点（category_id IS NULL）。"""
@@ -162,17 +162,63 @@ class SpotDao:
             "ORDER BY sort_order, name COLLATE NOCASE",
             (map_id,),
         )
-        return [dict(r) for r in rows]
+        return self._attach_images([dict(r) for r in rows])
+
+    # ---- 多图辅助 ----
+    def list_images(self, spot_id: int) -> list[str]:
+        """返回某瞄点按顺序排列的图片相对路径列表。"""
+        rows = self.db.query(
+            "SELECT image_path FROM spot_images WHERE spot_id=? ORDER BY sort_order, id",
+            (spot_id,),
+        )
+        return [r["image_path"] for r in rows]
+
+    def _attach_images(self, spots: list[dict]) -> list[dict]:
+        """批量为瞄点列表附加 images 字段，避免 N+1 查询。"""
+        if not spots:
+            return spots
+        ids = [s["id"] for s in spots]
+        q = ",".join("?" * len(ids))
+        rows = self.db.query(
+            f"SELECT spot_id, image_path FROM spot_images WHERE spot_id IN ({q}) "
+            f"ORDER BY spot_id, sort_order, id",
+            tuple(ids),
+        )
+        grouped: dict[int, list[str]] = {}
+        for r in rows:
+            grouped.setdefault(r["spot_id"], []).append(r["image_path"])
+        for s in spots:
+            s["images"] = grouped.get(s["id"], [])
+        return spots
+
+    def set_images(self, spot_id: int, paths: list[str]) -> None:
+        """用给定的有序路径列表替换瞄点的全部图片，并同步 spots.image_path 为首图。"""
+        paths = [p for p in (paths or []) if p]
+        first = paths[0] if paths else None
+        with self.db.transaction() as cur:
+            cur.execute("DELETE FROM spot_images WHERE spot_id=?", (spot_id,))
+            for i, p in enumerate(paths):
+                cur.execute(
+                    "INSERT INTO spot_images(spot_id, image_path, sort_order) VALUES(?, ?, ?)",
+                    (spot_id, p, i),
+                )
+            cur.execute(
+                "UPDATE spots SET image_path=?, updated_at=datetime('now','localtime') WHERE id=?",
+                (first, spot_id),
+            )
 
     def get(self, spot_id: int) -> dict | None:
-        return _row_to_dict(self.db.query_one("SELECT * FROM spots WHERE id=?", (spot_id,)))
+        d = _row_to_dict(self.db.query_one("SELECT * FROM spots WHERE id=?", (spot_id,)))
+        if d is not None:
+            d["images"] = self.list_images(spot_id)
+        return d
 
     def create(
         self,
         map_id: int,
         name: str,
         description: str = "",
-        image_path: str | None = None,
+        image_paths: list[str] | None = None,
         category_id: int | None = None,
     ) -> int:
         name = name.strip()
@@ -188,22 +234,31 @@ class SpotDao:
             if cat["map_id"] != map_id:
                 raise DaoError("分类与地图不匹配")
         next_order = self._next_order(map_id)
-        return self.db.execute(
-            "INSERT INTO spots(map_id, category_id, name, description, image_path, sort_order) "
-            "VALUES(?, ?, ?, ?, ?, ?)",
-            (map_id, category_id, name, description or "", image_path, next_order),
-        )
+        paths = [p for p in (image_paths or []) if p]
+        first = paths[0] if paths else None
+        with self.db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO spots(map_id, category_id, name, description, image_path, sort_order) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (map_id, category_id, name, description or "", first, next_order),
+            )
+            spot_id = cur.lastrowid
+            for i, p in enumerate(paths):
+                cur.execute(
+                    "INSERT INTO spot_images(spot_id, image_path, sort_order) VALUES(?, ?, ?)",
+                    (spot_id, p, i),
+                )
+        return spot_id
 
     def update(
         self,
         spot_id: int,
         name: str | None = None,
         description: str | None = None,
-        image_path: str | None = None,
-        clear_image: bool = False,
         category_id: int | None = ...,  # 省略号表示不修改
     ) -> None:
-        spot = self.get(spot_id)
+        """仅更新文本/归属字段；图片由 set_images 管理。"""
+        spot = self.db.query_one("SELECT id FROM spots WHERE id=?", (spot_id,))
         if not spot:
             raise DaoError("瞄点不存在")
         fields = []
@@ -217,11 +272,6 @@ class SpotDao:
         if description is not None:
             fields.append("description=?")
             params.append(description)
-        if clear_image:
-            fields.append("image_path=NULL")
-        elif image_path is not None:
-            fields.append("image_path=?")
-            params.append(image_path)
         if category_id is not ...:
             fields.append("category_id=?")
             params.append(category_id)
@@ -237,7 +287,8 @@ class SpotDao:
         self.db.execute("DELETE FROM spots WHERE id=?", (spot_id,))
 
     def all_image_paths(self) -> list[str]:
-        rows = self.db.query("SELECT image_path FROM spots WHERE image_path IS NOT NULL")
+        """全库被引用的图片相对路径（来自 spot_images）。"""
+        rows = self.db.query("SELECT image_path FROM spot_images")
         return [r["image_path"] for r in rows]
 
     def _next_order(self, map_id: int) -> int:

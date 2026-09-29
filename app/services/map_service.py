@@ -37,13 +37,15 @@ class MapService:
 
     def delete_map(self, map_id: int) -> None:
         """级联删除地图及其分类/瞄点，并清理图片文件。"""
-        # 先收集待删图片路径
-        paths = [s["image_path"] for s in self.dao.spots.list_by_map(map_id) if s["image_path"]]
+        # 先收集待删图片路径（多图）
+        paths: list[str] = []
+        for s in self.dao.spots.list_by_map(map_id):
+            paths.extend(s.get("images") or [])
         try:
             self.dao.maps.delete(map_id)
         except DaoError as e:
             raise ServiceError(str(e))
-        self.images.delete_many(paths)
+        self._delete_unreferenced(paths)
         log.info("地图已删除 id=%s，清理图片 %d 张", map_id, len(paths))
 
     def count_children(self, map_id: int) -> tuple[int, int]:
@@ -69,12 +71,14 @@ class MapService:
             raise ServiceError(str(e))
 
     def delete_category(self, cat_id: int) -> None:
-        paths = [s["image_path"] for s in self.dao.spots.list_by_category(cat_id) if s["image_path"]]
+        paths: list[str] = []
+        for s in self.dao.spots.list_by_category(cat_id):
+            paths.extend(s.get("images") or [])
         try:
             self.dao.categories.delete(cat_id)
         except DaoError as e:
             raise ServiceError(str(e))
-        self.images.delete_many(paths)
+        self._delete_unreferenced(paths)
         log.info("分类已删除 id=%s，清理图片 %d 张", cat_id, len(paths))
 
     def count_category_spots(self, cat_id: int) -> int:
@@ -98,27 +102,30 @@ class MapService:
         map_id: int,
         name: str,
         description: str = "",
-        image_src: str | None = None,
+        image_srcs: list[str] | None = None,
         category_id: int | None = None,
     ) -> int:
-        """新建瞄点。image_src 为磁盘图片路径（可选）。失败时补偿删除已落盘图片。"""
-        rel = None
+        """新建瞄点（支持多图）。image_srcs 为磁盘图片路径列表（可选）。
+
+        失败时补偿删除本次已落盘的图片。
+        """
+        rels: list[str] = []
         try:
-            if image_src:
-                rel = self.images.import_from_file(image_src)
+            for src in (image_srcs or []):
+                if src:
+                    rels.append(self.images.import_from_file(src))
             return self.dao.spots.create(
                 map_id=map_id,
                 name=name,
                 description=description,
-                image_path=rel,
+                image_paths=rels,
                 category_id=category_id,
             )
         except (DaoError, ServiceError) as e:
-            # DAO 失败：若图片是本次新落盘的，需回滚删除
-            self._rollback_new_image(rel)
+            self._rollback_new_images(rels)
             raise ServiceError(str(e))
         except Exception as e:
-            self._rollback_new_image(rel)
+            self._rollback_new_images(rels)
             raise ServiceError(f"新建瞄点失败: {e}")
 
     def create_spot_with_clipboard(
@@ -128,19 +135,21 @@ class MapService:
         description: str = "",
         category_id: int | None = None,
     ) -> int:
-        """新建瞄点并从剪贴板取图（无图也允许）。"""
-        rel = None
+        """新建瞄点并从剪贴板取一张图（无图也允许）。"""
+        rels: list[str] = []
         try:
             rel = self.images.import_from_clipboard()
+            if rel:
+                rels.append(rel)
             return self.dao.spots.create(
                 map_id=map_id,
                 name=name,
                 description=description,
-                image_path=rel,
+                image_paths=rels,
                 category_id=category_id,
             )
         except DaoError as e:
-            self._rollback_new_image(rel)
+            self._rollback_new_images(rels)
             raise ServiceError(str(e))
 
     def update_spot(
@@ -148,43 +157,56 @@ class MapService:
         spot_id: int,
         name: str | None = None,
         description: str | None = None,
-        new_image_src: str | None = None,
-        remove_image: bool = False,
+        image_sources: list[str] | None = None,
     ) -> None:
-        """编辑瞄点。替换图片时删除旧图；移除图片时删除旧图。"""
+        """编辑瞄点。
+
+        image_sources 为最终的有序图片列表，每项要么是已存在的相对路径
+        （保留），要么是新的磁盘文件路径（导入）。传 None 表示不改图片。
+        完成后删除不再被任何瞄点引用的旧图。
+        """
         old = self.dao.spots.get(spot_id)
         if not old:
             raise ServiceError("瞄点不存在")
-        old_rel = old["image_path"]
-        new_rel = None
+        old_images = list(old.get("images") or [])
+        imported: list[str] = []
         try:
-            if new_image_src:
-                new_rel = self.images.import_from_file(new_image_src)
-            self.dao.spots.update(
-                spot_id,
-                name=name,
-                description=description,
-                image_path=new_rel,
-                clear_image=remove_image,
-            )
-        except DaoError as e:
-            self._rollback_new_image(new_rel)
+            if name is not None or description is not None:
+                self.dao.spots.update(spot_id, name=name, description=description)
+            if image_sources is not None:
+                new_rels: list[str] = []
+                for src in image_sources:
+                    if not src:
+                        continue
+                    if src in old_images:
+                        new_rels.append(src)  # 已有图，保留
+                    else:
+                        rel = self.images.import_from_file(src)  # 新磁盘文件
+                        new_rels.append(rel)
+                        imported.append(rel)
+                self.dao.spots.set_images(spot_id, new_rels)
+        except (DaoError, ServiceError) as e:
+            self._rollback_new_images(imported)
             raise ServiceError(str(e))
-        # 成功后清理被替换/移除的旧图（若与新图不同）
-        if old_rel and old_rel != new_rel:
-            if remove_image or new_rel:
-                self.images.delete_image(old_rel)
+        except Exception as e:
+            self._rollback_new_images(imported)
+            raise ServiceError(f"编辑瞄点失败: {e}")
+        # 删除被移除且不再被引用的旧图
+        if image_sources is not None:
+            kept = set(self.dao.spots.list_images(spot_id))
+            removed = [p for p in old_images if p not in kept]
+            self._delete_unreferenced(removed)
 
     def delete_spot(self, spot_id: int) -> None:
         spot = self.dao.spots.get(spot_id)
         if not spot:
             return
+        paths = list(spot.get("images") or [])
         try:
             self.dao.spots.delete(spot_id)
         except DaoError as e:
             raise ServiceError(str(e))
-        if spot["image_path"]:
-            self.images.delete_image(spot["image_path"])
+        self._delete_unreferenced(paths)
 
     def _rollback_new_image(self, rel: str | None) -> None:
         """补偿：删除本次刚落盘、但记录未成功写入的图片。"""
@@ -194,6 +216,20 @@ class MapService:
         referenced = set(self.dao.spots.all_image_paths())
         if rel not in referenced:
             self.images.delete_image(rel)
+
+    def _rollback_new_images(self, rels: list[str]) -> None:
+        for rel in rels:
+            self._rollback_new_image(rel)
+
+    def _delete_unreferenced(self, paths: list[str]) -> None:
+        """删除不再被任何瞄点引用的图片（去重共享场景下安全）。"""
+        candidates = [p for p in paths if p]
+        if not candidates:
+            return
+        referenced = set(self.dao.spots.all_image_paths())
+        to_del = [p for p in candidates if p not in referenced]
+        if to_del:
+            self.images.delete_many(to_del)
 
     # ================= 统计 / 维护 =================
     def stats(self) -> dict:

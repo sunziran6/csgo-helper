@@ -91,8 +91,8 @@ def run() -> int:
     _make_png(p1, color=(10, 200, 10))
     _make_png(p2, color=(10, 10, 220))
 
-    s1 = svc.create_spot(m1, "A大门预瞄", "站A大门贴墙，准星对箱子右上角", str(p1), category_id=c1)
-    s2 = svc.create_spot(m1, "A小预瞄", "描述2", str(p2), category_id=c1)
+    s1 = svc.create_spot(m1, "A大门预瞄", "站A大门贴墙，准星对箱子右上角", [str(p1)], category_id=c1)
+    s2 = svc.create_spot(m1, "A小预瞄", "描述2", [str(p2)], category_id=c1)
     s3 = svc.create_spot(m1, "地图直属瞄点", "无分类", None, category_id=None)
     check("分类下瞄点数=2", len(svc.list_spots_by_category(c1)) == 2)
     check("地图直属瞄点数=1", len(svc.list_map_direct_spots(m1)) == 1)
@@ -102,7 +102,7 @@ def run() -> int:
     old_rel = svc.get_spot(s1)["image_path"]
     p3 = tmp / "shot3.png"
     _make_png(p3, color=(240, 160, 0))
-    svc.update_spot(s1, name="A大门预瞄(改)", new_image_src=str(p3))
+    svc.update_spot(s1, name="A大门预瞄(改)", image_sources=[str(p3)])
     new_rel = svc.get_spot(s1)["image_path"]
     check("名称已更新", svc.get_spot(s1)["name"] == "A大门预瞄(改)")
     check("图片路径已变更", old_rel != new_rel)

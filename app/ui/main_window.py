@@ -272,13 +272,9 @@ class MainWindow:
         left.pack_propagate(False)
         tk.Frame(main, bg=T.COLOR_BORDER, width=1).pack(side="left", fill="y")
 
-        head = tk.Frame(left, bg=T.COLOR_PANEL)
-        head.pack(fill="x", padx=18, pady=(16, 8))
-        tk.Label(head, text="分类", bg=T.COLOR_PANEL, fg=T.COLOR_TEXT_DIM,
-                 font=T.FONT_BOLD).pack(side="left")
-
+        # 左栏不再显示「分类」标题：该栏同时容纳分类与地图直属瞄点
         self.cat_area = ScrollArea(left, bg=T.COLOR_PANEL)
-        self.cat_area.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.cat_area.pack(fill="both", expand=True, padx=10, pady=(12, 10))
         self.cat_inner = self.cat_area.inner
 
         # 右：展示区
@@ -336,16 +332,22 @@ class MainWindow:
         if not self.current_map:
             return
         map_id = self.current_map["id"]
+        # 上：分类（可展开，展开后显示其下瞄点）
         cats = self.svc.list_categories(map_id)
         for c in cats:
             self._add_category_row(c["id"], c["name"])
-        # 仅当存在分类、或确有地图直属瞄点时才显示「地图直属」；否则左侧留空
-        if cats or self.svc.list_map_direct_spots(map_id):
-            self._add_category_row(DIRECT, "地图直属")
+        # 下：地图直属瞄点（不归任何分类，直接平铺，不再显示「地图直属」节点）
+        direct_spots = self.svc.list_map_direct_spots(map_id)
+        if direct_spots:
+            if cats:
+                self._add_divider()
+            for s in direct_spots:
+                self._add_spot_row(s)
 
     def _add_category_row(self, key, name: str) -> None:
         is_direct = key == DIRECT
         selected = self.selection == ("cat", key)
+        expanded = key in self.expanded
         bg = T.COLOR_ACCENT_SOFT if selected else T.COLOR_PANEL
 
         row = tk.Frame(self.cat_inner, bg=bg, cursor="hand2")
@@ -356,8 +358,12 @@ class MainWindow:
         label = tk.Label(row, text=name, bg=bg, fg=T.COLOR_TEXT if selected else T.COLOR_TEXT,
                          font=T.FONT_BOLD if selected else T.FONT_BASE, anchor="w", padx=12, pady=8)
         label.pack(side="left", fill="x", expand=True)
+        # 右侧展开状态箭头：展开 ▲ / 折叠 ▼
+        chevron = tk.Label(row, text=("▲" if expanded else "▼"), bg=bg, fg=T.COLOR_TEXT_DIM,
+                           font=("Microsoft YaHei UI", 8), padx=12)
+        chevron.pack(side="right")
 
-        widgets = [row, bar, label]
+        widgets = [row, bar, label, chevron]
         self._cat_rows[key] = widgets
         for w in widgets:
             w.bind("<Button-1>", lambda e, k=key: self._on_category_click(k))
@@ -366,7 +372,7 @@ class MainWindow:
                 w.bind("<Enter>", lambda e, ws=widgets: self._hover(ws, T.COLOR_HOVER))
                 w.bind("<Leave>", lambda e, ws=widgets: self._hover(ws, T.COLOR_PANEL))
 
-        if key in self.expanded:
+        if expanded:
             self._add_spot_rows(key)
 
     def _add_spot_rows(self, key) -> None:
@@ -402,6 +408,11 @@ class MainWindow:
                 w.bind("<Enter>", lambda e, ws=widgets: self._hover(ws, T.COLOR_HOVER))
                 w.bind("<Leave>", lambda e, ws=widgets: self._hover(ws, T.COLOR_PANEL))
 
+    def _add_divider(self) -> None:
+        """分类与地图直属瞄点之间的细分隔线。"""
+        d = tk.Frame(self.cat_inner, bg=T.COLOR_BORDER, height=1)
+        d.pack(fill="x", padx=14, pady=8)
+
     def _hover(self, widgets, color) -> None:
         for w in widgets:
             try:
@@ -431,13 +442,10 @@ class MainWindow:
 
     def _on_category_right_click(self, event, key) -> None:
         menu = self._popup_menu()
-        if key == DIRECT:
-            menu.add_command(label="新建地图直属瞄点", command=lambda: self._open_add("瞄点", DIRECT))
-        else:
-            menu.add_command(label="在此分类下新建瞄点", command=lambda: self._open_add("瞄点", key))
-            menu.add_command(label="重命名分类", command=lambda: self._rename_category(key))
-            menu.add_separator()
-            menu.add_command(label="删除分类", command=lambda: self._delete_category(key))
+        menu.add_command(label="在此分类下新建瞄点", command=lambda: self._open_add("瞄点", key))
+        menu.add_command(label="重命名分类", command=lambda: self._rename_category(key))
+        menu.add_separator()
+        menu.add_command(label="删除分类", command=lambda: self._delete_category(key))
         menu.tk_popup(event.x_root, event.y_root)
 
     def _on_spot_right_click(self, event, spot_id: int) -> None:
@@ -464,19 +472,16 @@ class MainWindow:
             self._show_empty("请先选择地图")
             return
         key = self.current_category_id
-        if key == DIRECT or (self.selection and self.selection[0] == "cat" and self.selection[1] == DIRECT):
-            spots = self.svc.list_map_direct_spots(self.current_map["id"])
-            title = "地图直属"
-        elif isinstance(key, int):
+        if isinstance(key, int):
             cat = self.svc.dao.categories.get(key)
             spots = self.svc.list_spots_by_category(key)
-            title = cat["name"] if cat else "分类"
+            title = cat["name"] if cat else "瞄点"
+            self._render_grid(title, spots, cat_id=key)
         else:
-            spots = self.svc.list_spots_by_map(self.current_map["id"])
-            title = "全部瞄点"
-        self._render_grid(title, spots)
+            # 未选中具体分类：默认展示空
+            self._show_empty("从左侧选择分类或瞄点查看详情")
 
-    def _render_grid(self, title: str, spots: list[dict]) -> None:
+    def _render_grid(self, title: str, spots: list[dict], cat_id: int | None = None) -> None:
         self._clear_display()
         head = tk.Frame(self.disp_inner, bg=T.COLOR_BG)
         head.pack(fill="x", padx=26, pady=(22, 6))
@@ -484,6 +489,12 @@ class MainWindow:
                  font=("Microsoft YaHei UI", 15, "bold")).pack(side="left")
         tk.Label(head, text=f"{len(spots)} 个瞄点", bg=T.COLOR_BG, fg=T.COLOR_TEXT_DIM,
                  font=T.FONT_SMALL).pack(side="left", padx=(10, 0), pady=(6, 0))
+        # 选中真实分类时，右上角提供编辑/删除（与瞄点一致）
+        if cat_id is not None:
+            ttk.Button(head, text="删除", style="Danger.TButton",
+                       command=lambda: self._delete_category(cat_id)).pack(side="right", padx=(8, 0))
+            ttk.Button(head, text="编辑",
+                       command=lambda: self._rename_category(cat_id)).pack(side="right")
 
         if not spots:
             tk.Label(self.disp_inner, text="暂无瞄点，点击右下角 ＋ 添加",
@@ -505,9 +516,12 @@ class MainWindow:
                        bd=0, cursor="hand2")
         T.round_rect(cv, 1, 1, w - 1, h - 1, T.RADIUS_CARD, fill=T.COLOR_CARD, outline=T.COLOR_BORDER, width=1)
 
-        # 缩略图（圆角区域内）
+        # 缩略图（首图，圆角区域内）
         img_top, img_bottom = 10, 112
-        thumb = self.svc.images.thumbnail_path(spot.get("image_path"), size=200)
+        imgs = spot.get("images") or ([spot["image_path"]] if spot.get("image_path") else [])
+        first_rel = imgs[0] if imgs else None
+        thumb = self.svc.images.thumbnail_path(first_rel, size=200)
+        img_count = len(imgs)
         if thumb and thumb.exists():
             try:
                 from PIL import Image, ImageTk
@@ -516,6 +530,12 @@ class MainWindow:
                 photo = ImageTk.PhotoImage(im)
                 cv.create_image(w // 2, (img_top + img_bottom) // 2, image=photo)
                 self._thumb_refs.append(photo)
+                # 多图角标
+                if img_count > 1:
+                    T.round_rect(cv, w - 46, img_bottom - 26, w - 12, img_bottom - 8, 8,
+                                 fill="#000000", outline="#000000")
+                    cv.create_text(w - 29, img_bottom - 17, text=f"{img_count}图",
+                                   fill="#ffffff", font=("Microsoft YaHei UI", 8, "bold"))
             except Exception:  # noqa: BLE001
                 cv.create_text(w // 2, (img_top + img_bottom) // 2, text="无图片",
                                fill=T.COLOR_TEXT_DIM, font=T.FONT_SMALL)
@@ -569,25 +589,42 @@ class MainWindow:
         tk.Label(wrap, text=f"{map_name}   ·   {cat_txt}", bg=T.COLOR_BG, fg=T.COLOR_TEXT_DIM,
                  font=T.FONT_SMALL, anchor="w").pack(fill="x", pady=(6, 14))
 
-        # 大图（圆角容器）
+        # 图片画廊（多图，圆角容器）
+        imgs = spot.get("images") or ([spot["image_path"]] if spot.get("image_path") else [])
+        abs_paths: list[str] = []
+        for rel in imgs:
+            p = config.abspath(rel)
+            if p and p.exists():
+                abs_paths.append(str(p))
+
         img_wrap = tk.Frame(wrap, bg=T.COLOR_PANEL, bd=0, highlightthickness=1,
                             highlightbackground=T.COLOR_BORDER)
         img_wrap.pack(fill="x")
-        img_box = tk.Label(img_wrap, bg=T.COLOR_PANEL, fg=T.COLOR_TEXT_DIM, text="无图片",
-                           font=T.FONT_BASE)
-        abs_p = config.abspath(spot.get("image_path"))
-        if abs_p and abs_p.exists():
-            try:
-                from PIL import Image, ImageTk
-                im = Image.open(abs_p)
-                im.thumbnail((720, 420), Image.LANCZOS)
-                photo = ImageTk.PhotoImage(im)
-                img_box.configure(image=photo, text="", cursor="hand2")
-                img_box.bind("<Button-1>", lambda e, p=str(abs_p): open_image_viewer(self.root, p))
-                self._thumb_refs.append(photo)
-            except Exception as ex:  # noqa: BLE001
-                img_box.configure(text=f"图片加载失败: {ex}", image="")
-        img_box.pack(padx=10, pady=10)
+        if not abs_paths:
+            tk.Label(img_wrap, text="无图片", bg=T.COLOR_PANEL, fg=T.COLOR_TEXT_DIM,
+                     font=T.FONT_BASE).pack(padx=10, pady=24)
+        else:
+            if len(abs_paths) > 1:
+                tk.Label(img_wrap, text=f"共 {len(abs_paths)} 张图片（点击看大图，可左右切换）",
+                         bg=T.COLOR_PANEL, fg=T.COLOR_TEXT_DIM, font=T.FONT_SMALL,
+                         anchor="w").pack(fill="x", padx=14, pady=(10, 0))
+            gallery = tk.Frame(img_wrap, bg=T.COLOR_PANEL)
+            gallery.pack(fill="x", padx=8, pady=10)
+            from PIL import Image, ImageTk
+            per_row = 3
+            for i, p in enumerate(abs_paths):
+                r, c = divmod(i, per_row)
+                try:
+                    im = Image.open(p)
+                    im.thumbnail((230, 160), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(im)
+                    self._thumb_refs.append(photo)
+                    lbl = tk.Label(gallery, image=photo, bg=T.COLOR_PANEL, cursor="hand2", bd=0)
+                    lbl.grid(row=r, column=c, padx=6, pady=6, sticky="n")
+                    lbl.bind("<Button-1>", lambda e, idx=i: open_image_viewer(self.root, abs_paths, idx))
+                except Exception:  # noqa: BLE001
+                    tk.Label(gallery, text="加载失败", bg=T.COLOR_PANEL, fg=T.COLOR_TEXT_DIM,
+                             width=28, height=8).grid(row=r, column=c, padx=6, pady=6)
 
         # 描述卡片
         desc_card = tk.Frame(wrap, bg=T.COLOR_PANEL, bd=0, highlightthickness=1,
@@ -655,7 +692,7 @@ class MainWindow:
                 new_id = self.svc.create_spot(
                     map_id=ctx["map_id"], name=result["name"],
                     description=result.get("description", ""),
-                    image_src=result.get("image_src"), category_id=ctx.get("category_id"))
+                    image_srcs=result.get("image_srcs"), category_id=ctx.get("category_id"))
                 self._reveal_spot(new_id, ctx.get("category_id"))
             self._refresh_display()
             self._update_status()
@@ -679,7 +716,7 @@ class MainWindow:
         try:
             self.svc.update_spot(
                 spot_id, name=result["name"], description=result["description"],
-                new_image_src=result.get("image_src"), remove_image=result.get("remove_image", False))
+                image_sources=result.get("image_sources"))
             self._refresh_tree()
             self.current_spot = self.svc.get_spot(spot_id)
             self._show_spot_detail(self.current_spot)
@@ -709,12 +746,13 @@ class MainWindow:
         if not cat:
             return
         from .simple_dialog import ask_text
-        new_name = ask_text(self.root, "重命名分类", "分类名称", cat["name"])
+        new_name = ask_text(self.root, "编辑分类", "分类名称", cat["name"])
         if not new_name:
             return
         try:
             self.svc.rename_category(cat_id, new_name)
             self._refresh_tree()
+            self._refresh_display()
         except ServiceError as e:
             messagebox.showerror("重命名失败", str(e))
 
@@ -731,6 +769,8 @@ class MainWindow:
             if self.current_category_id == cat_id:
                 self.current_category_id = None
                 self.current_spot = None
+            if self.selection == ("cat", cat_id):
+                self.selection = None
             self.expanded.discard(cat_id)
             self._refresh_tree()
             self._refresh_display()
@@ -840,8 +880,8 @@ class MainWindow:
         elif self.selection and self.selection[0] == "cat":
             self._show_category_grid()
         elif self.current_map:
-            spots = self.svc.list_spots_by_map(self.current_map["id"])
-            self._render_grid("全部瞄点", spots)
+            # 打开地图默认展示空，由用户从左侧选择分类或瞄点
+            self._show_empty("从左侧选择分类或瞄点查看详情")
         else:
             self._show_empty("请先选择或新建地图")
 

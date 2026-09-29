@@ -86,6 +86,31 @@ class ImageService:
         img.convert("RGB").save(buf, format="PNG")
         return self._import_bytes(buf.getvalue(), ".png")
 
+    # ---- 剪贴板→临时文件（不入库）----
+    def clipboard_to_temp(self) -> str | None:
+        """从剪贴板取图保存到系统临时目录，返回临时文件路径。
+
+        与 import_from_clipboard 不同：不写入图库，用于多图编辑时暂存，
+        由后续 import_from_file 正式导入。无图返回 None。
+        """
+        import tempfile
+
+        img = ImageGrab.grabclipboard()
+        if img is None:
+            return None
+        if isinstance(img, (list, tuple)) and img:
+            # 剪贴板是文件列表：直接返回首个存在的文件路径
+            for p in img:
+                if Path(str(p)).exists():
+                    return str(p)
+            return None
+        if not isinstance(img, Image.Image):
+            return None
+        fd, tmp = tempfile.mkstemp(suffix=".png", prefix="aim_paste_")
+        os.close(fd)
+        img.convert("RGB").save(tmp, format="PNG")
+        return tmp
+
     # ---- 核心：字节落盘 ----
     def _import_bytes(self, data: bytes, ext: str) -> str:
         if len(data) > config.MAX_IMAGE_BYTES:
@@ -93,8 +118,14 @@ class ImageService:
 
         md5 = self._bytes_md5(data)
         if md5 in self._hash_cache:
-            log.info("图片去重命中: %s", self._hash_cache[md5])
-            return self._hash_cache[md5]
+            cached_rel = self._hash_cache[md5]
+            cached_abs = config.abspath(cached_rel)
+            if cached_abs and cached_abs.exists():
+                log.info("图片去重命中: %s", cached_rel)
+                return cached_rel
+            # 缓存指向的文件已不存在（例如之前被删除），失效并重新落盘
+            log.warning("去重缓存失效（文件缺失），重新导入: %s", cached_rel)
+            del self._hash_cache[md5]
 
         name = f"{uuid.uuid4().hex}{ext}"
         dest = config.IMAGES_DIR / name
@@ -170,6 +201,8 @@ class ImageService:
                 log.info("图片已删除: %s", rel_path)
             except OSError as e:
                 log.warning("删除图片失败 %s: %s", rel_path, e)
+        # 无论文件是否存在，都从去重缓存中移除该路径，避免后续导入命中幽灵文件
+        self._hash_cache = {k: v for k, v in self._hash_cache.items() if v != rel_path}
 
     def delete_many(self, rel_paths) -> None:
         for rp in rel_paths:

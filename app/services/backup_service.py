@@ -23,7 +23,7 @@ from .image_service import ImageService
 
 log = get_logger("aim.backup")
 
-BACKUP_FORMAT_VERSION = 1
+BACKUP_FORMAT_VERSION = 2
 
 
 class BackupError(Exception):
@@ -47,22 +47,30 @@ class BackupService:
         map_ids = [m["id"] for m in maps]
         categories: list[dict] = []
         spots: list[dict] = []
+        spot_images: list[dict] = []
         if map_ids:
             qmarks = ",".join("?" * len(map_ids))
             categories = [dict(r) for r in self.db.query(
                 f"SELECT * FROM categories WHERE map_id IN ({qmarks})", tuple(map_ids))]
             spots = [dict(r) for r in self.db.query(
                 f"SELECT * FROM spots WHERE map_id IN ({qmarks})", tuple(map_ids))]
+            spot_ids = [s["id"] for s in spots]
+            if spot_ids:
+                sq = ",".join("?" * len(spot_ids))
+                spot_images = [dict(r) for r in self.db.query(
+                    f"SELECT * FROM spot_images WHERE spot_id IN ({sq}) ORDER BY spot_id, sort_order, id",
+                    tuple(spot_ids))]
 
-        data = {"maps": maps, "categories": categories, "spots": spots}
+        data = {"maps": maps, "categories": categories,
+                "spots": spots, "spot_images": spot_images}
         meta = {
             "format_version": BACKUP_FORMAT_VERSION,
             "app_version": config.APP_VERSION,
             "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        # 收集图片
-        image_rels = sorted({s["image_path"] for s in spots if s["image_path"]})
+        # 收集图片（来自 spot_images）
+        image_rels = sorted({si["image_path"] for si in spot_images if si["image_path"]})
 
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
@@ -104,6 +112,12 @@ class BackupService:
             maps = data.get("maps", [])
             categories = data.get("categories", [])
             spots = data.get("spots", [])
+            spot_images_data = data.get("spot_images", [])
+
+            # 旧 spot_id -> 按顺序的图片相对路径列表（新格式）
+            spot_img_map: dict[int, list[str]] = {}
+            for si in sorted(spot_images_data, key=lambda x: (x.get("sort_order", 0), x.get("id", 0))):
+                spot_img_map.setdefault(si["spot_id"], []).append(si["image_path"])
 
             stats = {"maps": 0, "categories": 0, "spots": 0, "skipped_maps": 0}
 
@@ -116,10 +130,13 @@ class BackupService:
                     if conflict == "overwrite":
                         # 删除旧地图（级联），再作为新地图导入
                         old_paths = [r["image_path"] for r in self.db.query(
-                            "SELECT image_path FROM spots WHERE map_id=? AND image_path IS NOT NULL",
+                            "SELECT si.image_path FROM spot_images si "
+                            "JOIN spots s ON si.spot_id=s.id WHERE s.map_id=?",
                             (existing["id"],))]
                         self.db.execute("DELETE FROM maps WHERE id=?", (existing["id"],))
-                        self.images.delete_many(old_paths)
+                        referenced = {r["image_path"] for r in self.db.query(
+                            "SELECT image_path FROM spot_images")}
+                        self.images.delete_many([p for p in old_paths if p not in referenced])
                     # duplicate：不改名，导入时地图名追加后缀
                 target_name = m["name"]
                 if conflict == "duplicate" and existing:
@@ -148,14 +165,28 @@ class BackupService:
                     stats["categories"] += 1
 
                 for s in [s for s in spots if s["map_id"] == m["id"]]:
-                    new_rel = self._import_image_from_zip(zf, s.get("image_path"))
+                    # 确定该瞄点的图片源列表：新格式用 spot_images，旧 v1 备份回退到 image_path
+                    src_rels = spot_img_map.get(s["id"])
+                    if src_rels is None:
+                        src_rels = [s["image_path"]] if s.get("image_path") else []
+                    new_rels: list[str] = []
+                    for rel in src_rels:
+                        nr = self._import_image_from_zip(zf, rel)
+                        if nr:
+                            new_rels.append(nr)
+                    first = new_rels[0] if new_rels else None
                     new_cat = cat_id_map.get(s["category_id"]) if s.get("category_id") else None
-                    self.db.execute(
+                    new_spot_id = self.db.execute(
                         "INSERT INTO spots(map_id, category_id, name, description, image_path, sort_order) "
                         "VALUES(?, ?, ?, ?, ?, ?)",
                         (new_map_id, new_cat, s["name"], s.get("description", ""),
-                         new_rel, s.get("sort_order", 0)),
+                         first, s.get("sort_order", 0)),
                     )
+                    for idx, nr in enumerate(new_rels):
+                        self.db.execute(
+                            "INSERT INTO spot_images(spot_id, image_path, sort_order) VALUES(?, ?, ?)",
+                            (new_spot_id, nr, idx),
+                        )
                     stats["spots"] += 1
 
         log.info("导入完成: %s", stats)
